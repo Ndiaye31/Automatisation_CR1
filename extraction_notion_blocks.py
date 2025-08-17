@@ -1,16 +1,17 @@
-# extraction_notion_blocks.py
+# extraction_notion_blocks_multi_pages.py
 import os
 from datetime import datetime
 from notion_client import Client
 from docx import Document
 from dotenv import load_dotenv
 from openai import OpenAI
+#from dateutil import parser
 
 # Charger variables d'environnement
 load_dotenv()
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID")
+NOTION_PAGE_IDS = os.getenv("NOTION_PAGE_IDS", "").split(",")  # liste séparée par virgules
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./rapports")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -23,6 +24,21 @@ os.makedirs(QR_DIR, exist_ok=True)
 # Clients API
 notion = Client(auth=NOTION_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# --- Gestion du timestamp d’export (par page) ---
+def get_last_export_time(page_id):
+    file = f"last_export_{page_id}.txt"
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return datetime.fromisoformat(f.read().strip())
+    return None
+
+
+def save_last_export_time(page_id):
+    file = f"last_export_{page_id}.txt"
+    with open(file, "w") as f:
+        f.write(datetime.now().isoformat())
 
 
 # --- Récupérer tous les blocs d'une page Notion ---
@@ -43,9 +59,23 @@ def get_all_blocks(page_id):
     return blocks
 
 
+# --- Filtrer seulement les blocs modifiés ---
+from datetime import datetime
+
+def get_modified_blocks(page_id, since_time=None):
+    blocks = get_all_blocks(page_id)
+    if since_time:
+        # Convertir le timestamp ISO 8601 en datetime
+        blocks = [
+            b for b in blocks
+            if datetime.fromisoformat(b["last_edited_time"].replace("Z", "+00:00")) > since_time
+        ]
+    return blocks
+
+
 # --- Récupérer le titre de la page ---
-def get_page_title():
-    page_info = notion.pages.retrieve(NOTION_PAGE_ID)
+def get_page_title(page_id):
+    page_info = notion.pages.retrieve(page_id)
     title_property = page_info["properties"]["title"]["title"]
     return title_property[0]["plain_text"].replace(" ", "_") if title_property else "Sans_Titre"
 
@@ -57,43 +87,14 @@ def extract_text_from_block(block):
     return "".join([t["text"]["content"] for t in text_elements if t["type"] == "text"])
 
 
-# --- Exporter Notion vers Word ---
-def export_notion_to_word():
-    page_title = get_page_title()
-    current_date = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    output_file = os.path.join(COURS_DIR, f"CR_{page_title}_Amadou_Mactar_{current_date}.docx")
-
-    blocks = get_all_blocks(NOTION_PAGE_ID)
-
-    document = Document()
+# --- Concaténer texte des blocs ---
+def get_text_from_blocks(blocks):
+    texts = []
     for block in blocks:
         text = extract_text_from_block(block)
-        if not text:
-            continue
-        if block["type"] == "heading_1":
-            document.add_heading(text, level=1)
-        elif block["type"] == "heading_2":
-            document.add_heading(text, level=2)
-        elif block["type"] == "heading_3":
-            document.add_heading(text, level=3)
-        elif block["type"] == "to_do":
-            document.add_paragraph(f"☐ {text}")
-        elif block["type"] == "bulleted_list_item":
-            document.add_paragraph(f"• {text}")
-        elif block["type"] == "numbered_list_item":
-            document.add_paragraph(f"1. {text}")
-        else:
-            document.add_paragraph(text)
-
-    document.save(output_file)
-    print(f"✅ Cours exporté : {output_file}")
-    return output_file
-
-
-# --- Lire texte d'un Word ---
-def extract_text_from_docx(file_path):
-    doc = Document(file_path)
-    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
 
 
 # --- Générer Q/R avec ChatGPT ---
@@ -123,3 +124,4 @@ def save_to_docx(content, output_file):
     for line in content.split("\n"):
         doc.add_paragraph(line)
     doc.save(output_file)
+
